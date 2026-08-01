@@ -43,6 +43,7 @@ def run_smoke(config_path: str) -> Dict:
         for method in methods:
             summaries.append(run_method(cfg, run_dir, method, task1, device, tasks))
         write_accuracy_summary(run_dir, summaries)
+        write_diagnostics_summary(run_dir)
         payload = {"run_dir": str(run_dir), "summaries": summaries}
         save_json(run_dir / "smoke_summary.json", payload)
         return payload
@@ -62,6 +63,7 @@ def run_pilot_selection(config_path: str, methods: List[str] = None) -> Dict:
         task1 = None if set(selected) == {"offline_ssl"} else train_task1(cfg, run_dir, device, tasks)
         summaries = [run_method(cfg, run_dir, method, task1, device, tasks) for method in selected]
         write_accuracy_summary(run_dir, summaries)
+        write_diagnostics_summary(run_dir)
         payload = {"run_dir": str(run_dir), "summaries": summaries}
         save_json(run_dir / "pilot_summary.json", payload)
         return payload
@@ -118,6 +120,61 @@ def write_accuracy_summary(run_dir: Path, summaries: List[Dict]) -> None:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _float_or_none(value):
+    if value in ("", None):
+        return None
+    return float(value)
+
+
+def write_diagnostics_summary(run_dir: Path) -> None:
+    rows = []
+    for log_path in sorted(run_dir.glob("*/train_log.csv")):
+        method = log_path.parent.name
+        with log_path.open() as f:
+            records = list(csv.DictReader(f))
+        if not records:
+            continue
+        numeric = {}
+        for key in [
+            "S_Q",
+            "D_Q_raw",
+            "R_Q",
+            "grad_cosine",
+            "lambda_star",
+            "correction_ratio",
+            "wall_time_s",
+            "peak_memory_mb",
+        ]:
+            values = [_float_or_none(row.get(key)) for row in records]
+            values = [v for v in values if v is not None]
+            if values:
+                numeric[f"mean_{key}"] = sum(values) / len(values)
+                numeric[f"max_{key}"] = max(values)
+        active_values = [row.get("active") for row in records if row.get("active") not in ("", None)]
+        skipped_values = [row.get("skipped") for row in records if row.get("skipped") not in ("", None)]
+        row = {
+            "method": method,
+            "steps": len(records),
+            "active_steps": sum(v == "True" for v in active_values),
+            "active_rate": sum(v == "True" for v in active_values) / max(len(active_values), 1),
+            "skipped_steps": sum(v == "True" for v in skipped_values),
+            **numeric,
+        }
+        rows.append(row)
+    if not rows:
+        return
+    fieldnames = []
+    for row in rows:
+        for key in row:
+            if key not in fieldnames:
+                fieldnames.append(key)
+    with (run_dir / "diagnostics_summary.csv").open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    save_json(run_dir / "diagnostics_summary.json", {"methods": rows})
 
 
 def inspect_one_update(config_path: str) -> Dict:
