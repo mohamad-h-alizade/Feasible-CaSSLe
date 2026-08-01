@@ -20,6 +20,16 @@ class SupportQueryBatch:
     query_targets: torch.Tensor
 
 
+class IndexedCIFAR100(torchvision.datasets.CIFAR100):
+    def __getitem__(self, index):
+        image, target = super().__getitem__(index)
+        return index, image, target
+
+
+def cifar_root(data_cfg: Dict) -> Path:
+    return Path(data_cfg["data_dir"]) / Path(data_cfg.get("cifar_root") or "cifar100")
+
+
 def cifar_task_order(seed: int, num_classes: int = 100, num_tasks: int = 5) -> List[torch.Tensor]:
     if num_classes % num_tasks != 0:
         raise ValueError("num_classes must divide num_tasks")
@@ -35,13 +45,11 @@ def build_pretrain_dataset(cfg: Dict, tasks: Sequence[torch.Tensor], task_idx: i
     aug_cfg = cfg["augmentations"]
     transform = pretrain.prepare_transform(data_cfg["dataset"], multicrop=False, **aug_cfg)
     task_transform = pretrain.prepare_n_crop_transform(transform, num_crops=2)
-    train_dataset, _ = pretrain.prepare_datasets(
-        data_cfg["dataset"],
-        task_transform=task_transform,
-        online_eval_transform=transform,
-        data_dir=Path(data_cfg["data_dir"]),
-        train_dir=data_cfg.get("train_dir"),
-        no_labels=False,
+    train_dataset = IndexedCIFAR100(
+        cifar_root(data_cfg),
+        train=True,
+        download=bool(data_cfg.get("download", True)),
+        transform=task_transform,
     )
     task_dataset, _ = pretrain.split_dataset(
         train_dataset,
@@ -65,13 +73,11 @@ def build_all_pretrain_dataset(cfg: Dict) -> Dataset:
     aug_cfg = cfg["augmentations"]
     transform = pretrain.prepare_transform(data_cfg["dataset"], multicrop=False, **aug_cfg)
     task_transform = pretrain.prepare_n_crop_transform(transform, num_crops=2)
-    train_dataset, _ = pretrain.prepare_datasets(
-        data_cfg["dataset"],
-        task_transform=task_transform,
-        online_eval_transform=transform,
-        data_dir=Path(data_cfg["data_dir"]),
-        train_dir=data_cfg.get("train_dir"),
-        no_labels=False,
+    train_dataset = IndexedCIFAR100(
+        cifar_root(data_cfg),
+        train=True,
+        download=bool(data_cfg.get("download", True)),
+        transform=task_transform,
     )
     limit = cfg["data"].get("offline_limit_examples")
     if limit:
@@ -151,9 +157,7 @@ def move_batch(batch: SupportQueryBatch, device: torch.device) -> SupportQueryBa
 
 def build_eval_datasets(cfg: Dict) -> Tuple[Dataset, Dataset]:
     data_cfg = cfg["data"]
-    data_dir = Path(data_cfg["data_dir"])
-    train_dir = Path(data_cfg["train_dir"] or "cifar100/train")
-    val_dir = Path(data_cfg["val_dir"] or "cifar100/val")
+    root = cifar_root(data_cfg)
     t_val = transforms.Compose(
         [
             transforms.ToTensor(),
@@ -164,15 +168,15 @@ def build_eval_datasets(cfg: Dict) -> Tuple[Dataset, Dataset]:
     # crops made identical checkpoints report different task-0 accuracies.
     t_train = t_val
     train_dataset = torchvision.datasets.CIFAR100(
-        data_dir / train_dir,
+        root,
         train=True,
-        download=True,
+        download=bool(data_cfg.get("download", True)),
         transform=t_train,
     )
     val_dataset = torchvision.datasets.CIFAR100(
-        data_dir / val_dir,
+        root,
         train=False,
-        download=True,
+        download=bool(data_cfg.get("download", True)),
         transform=t_val,
     )
     return train_dataset, val_dataset

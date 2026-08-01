@@ -13,6 +13,8 @@ experiment:
 
 data:
   dataset: cifar100
+  download: true
+  cifar_root: cifar100
   data_dir: ${DATA_DIR:-./data}
   train_dir:
   val_dir:

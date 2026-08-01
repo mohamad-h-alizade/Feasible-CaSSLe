@@ -16,12 +16,13 @@ Set the dataset path if you do not want the default `./data`:
 export DATA_DIR=/path/to/data
 ```
 
-The expected CIFAR-100 layout is compatible with torchvision:
+The expected CIFAR-100 layout is a single torchvision root:
 
 ```text
-$DATA_DIR/cifar100/train/cifar-100-python/
-$DATA_DIR/cifar100/val/cifar-100-python/
+$DATA_DIR/cifar100/cifar-100-python/
 ```
+
+The PoC configs default to `download: true`, but train and eval share the same root, so torchvision downloads/extracts CIFAR-100 once and reuses it on later runs. Set `data.download: false` if you want a wrong path to fail immediately.
 
 ## 2. Smoke Run
 
