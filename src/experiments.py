@@ -12,6 +12,7 @@ from src.cassle_compat import require_cassle_methods
 from src.data import cifar_task_order
 from src.models import build_model, build_temporal_predictor, freeze_historical_model, projection_dim
 from src.models import representation_parameters
+from src.plots import generate_run_figures
 from src.qp import grads_or_zeros, solve_feasible_step
 from src.temporal_losses import TemporalLossAdapter, normalized_reconstruction
 from src.trainer import (
@@ -58,7 +59,8 @@ def run_smoke(config_path: str) -> Dict:
             summaries.append(run_method(cfg, run_dir, method, task1, device, tasks, learning_fwt))
         write_accuracy_summary(run_dir, summaries)
         write_diagnostics_summary(run_dir)
-        payload = {"run_dir": str(run_dir), "summaries": summaries}
+        figures = generate_figures(cfg, run_dir)
+        payload = {"run_dir": str(run_dir), "summaries": summaries, "figures": figures}
         save_json(run_dir / "smoke_summary.json", payload)
         return payload
     except BaseException:
@@ -84,7 +86,8 @@ def run_pilot_selection(config_path: str, methods: List[str] = None) -> Dict:
         summaries = [run_method(cfg, run_dir, method, task1, device, tasks, learning_fwt) for method in selected]
         write_accuracy_summary(run_dir, summaries)
         write_diagnostics_summary(run_dir)
-        payload = {"run_dir": str(run_dir), "summaries": summaries}
+        figures = generate_figures(cfg, run_dir)
+        payload = {"run_dir": str(run_dir), "summaries": summaries, "figures": figures}
         save_json(run_dir / "pilot_summary.json", payload)
         return payload
     except BaseException:
@@ -106,6 +109,18 @@ def load_results(run_dir: str) -> Dict:
         with path.open() as f:
             payload["summaries"][path.parent.name] = json.load(f)
     return payload
+
+
+def generate_figures(cfg: Dict, run_dir: Path) -> List[str]:
+    try:
+        figures = generate_run_figures(cfg, run_dir)
+    except Exception as exc:
+        save_json(run_dir / "figures_error.json", {"error": str(exc)})
+        progress_print(cfg, f"[figures] skipped: {exc}")
+        return []
+    if figures:
+        progress_print(cfg, f"[figures] wrote {len(figures)} files to {run_dir / 'figures'}")
+    return figures
 
 
 def write_accuracy_summary(run_dir: Path, summaries: List[Dict]) -> None:

@@ -105,6 +105,15 @@ learning_forward_transfer_accuracy =
 
 Set `evaluation.learning_forward_transfer: false` to skip these extra isolated baselines.
 
+Figures are generated automatically after each completed run:
+
+```yaml
+plots:
+  enabled: true
+```
+
+Set `plots.enabled: false` to skip figure generation.
+
 ```yaml
 epochs: 100
 optimizer: SGD
@@ -147,6 +156,7 @@ shared/task0.ckpt
 <method>/train_log.csv
 <method>/eval_log.csv
 <method>/summary.json
+figures/*.png
 ```
 
 Important accuracy fields:

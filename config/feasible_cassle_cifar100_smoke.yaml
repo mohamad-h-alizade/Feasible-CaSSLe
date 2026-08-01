@@ -99,6 +99,9 @@ logging:
   progress: true
   progress_interval: 1
 
+plots:
+  enabled: true
+
 linear_eval:
   enabled: true
   epochs: 1
