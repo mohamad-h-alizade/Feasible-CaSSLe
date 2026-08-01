@@ -8,8 +8,10 @@ from torch import nn
 from src.cassle_compat import simclr_loss_func
 from src.calibration import CalibrationResult, calibrate_task, support_predictor_step
 from src.data import (
+    build_all_pretrain_dataset,
     build_eval_datasets,
     build_pretrain_dataset,
+    build_pretrain_loader,
     build_support_query_loader,
     cifar_task_order,
     class_subset,
@@ -17,6 +19,7 @@ from src.data import (
     move_batch,
     support_query_batches,
 )
+from src.linear_eval import run_linear_eval
 from src.metrics import (
     encode_dataset,
     seen_classes,
@@ -50,6 +53,7 @@ from src.utils import (
 
 
 METHODS = {
+    "offline_ssl",
     "finetune",
     "standard_cassle",
     "crossfit_cassle",
@@ -183,6 +187,60 @@ def train_task1(cfg: Dict, run_dir: Path, device: torch.device, tasks) -> Path:
     return ckpt_path
 
 
+def train_offline_ssl(cfg: Dict, run_dir: Path, device: torch.device, tasks) -> Dict:
+    method_dir = run_dir / "offline_ssl"
+    method_dir.mkdir(parents=True, exist_ok=False)
+    model = build_model(cfg, tasks=tasks, task_idx=0).to(device)
+    params = representation_parameters(model)
+    lr = float(cfg["optimization"]["lr"])
+    weight_decay = float(cfg["optimization"].get("weight_decay", 0.0))
+    dataset = build_all_pretrain_dataset(cfg)
+    loader = build_pretrain_loader(cfg, dataset)
+    epochs = int(cfg["training"].get("offline_epochs", cfg["training"]["epochs_per_task"]))
+    max_steps = int(cfg["training"].get("offline_max_query_updates", 0) or 10**12)
+    step = 0
+    reset_peak_memory(device)
+    for _ in range(epochs):
+        for _, views, _ in loader:
+            x1, x2 = views[0].to(device), views[1].to(device)
+            ssl, _, _ = _simclr_query_losses(cfg, model, None, None, None, (x1, x2))
+            assert_finite_tensor("offline_ssl_loss", ssl)
+            grads = grads_or_zeros(ssl, params)
+            apply_updates(params, _sgd_updates(params, grads, lr, weight_decay))
+            update_momentum_targets(model, tau=0.99)
+            append_csv(
+                method_dir / "train_log.csv",
+                {
+                    "step": step,
+                    "method": "offline_ssl",
+                    "S_Q": float(ssl.detach().cpu()),
+                    "peak_memory_mb": peak_memory_mb(device),
+                },
+            )
+            step += 1
+            if step >= max_steps:
+                break
+        if step >= max_steps:
+            break
+
+    ckpt = method_dir / "offline_ssl.ckpt"
+    torch.save(
+        {
+            **checkpoint_state(model),
+            "task_idx": "offline",
+            "method": "offline_ssl",
+            "class_order": [task.tolist() for task in tasks],
+            "config": cfg,
+        },
+        ckpt,
+    )
+    knn = evaluate_after_task(cfg, model, tasks, int(cfg["training"]["num_tasks"]) - 1, device)
+    linear = run_linear_eval(cfg, model, tasks, device, method_dir, tag="offline_ssl")
+    summary = {"method": "offline_ssl", "checkpoint": str(ckpt), "knn_eval": knn, "linear_eval": linear}
+    save_json(method_dir / "summary.json", summary)
+    return summary
+
+
 def run_method(
     cfg: Dict,
     run_dir: Path,
@@ -193,6 +251,8 @@ def run_method(
 ) -> Dict:
     if method not in METHODS:
         raise ValueError(f"Unknown method {method}; choose from {sorted(METHODS)}")
+    if method == "offline_ssl":
+        return train_offline_ssl(cfg, run_dir, device, tasks)
 
     method_dir = run_dir / method
     method_dir.mkdir(parents=True, exist_ok=False)
@@ -264,6 +324,16 @@ def run_method(
         append_csv(method_dir / "eval_log.csv", {"method": method, **eval_history[-1]})
 
     summary = {"method": method, "eval_history": eval_history}
+    final_linear = run_linear_eval(
+        cfg,
+        model,
+        tasks,
+        device,
+        method_dir,
+        tag=f"{method}_task{int(cfg['training']['num_tasks']) - 1}",
+    )
+    if final_linear:
+        summary["final_linear_eval"] = final_linear
     save_json(method_dir / "summary.json", summary)
     return summary
 

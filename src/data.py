@@ -56,6 +56,44 @@ def build_pretrain_dataset(cfg: Dict, tasks: Sequence[torch.Tensor], task_idx: i
     return task_dataset
 
 
+def build_all_pretrain_dataset(cfg: Dict) -> Dataset:
+    pretrain = load_repo_module(
+        "cassle/utils/pretrain_dataloader.py",
+        "_feasible_cassle_pretrain_dataloader_all",
+    )
+    data_cfg = cfg["data"]
+    aug_cfg = cfg["augmentations"]
+    transform = pretrain.prepare_transform(data_cfg["dataset"], multicrop=False, **aug_cfg)
+    task_transform = pretrain.prepare_n_crop_transform(transform, num_crops=2)
+    train_dataset, _ = pretrain.prepare_datasets(
+        data_cfg["dataset"],
+        task_transform=task_transform,
+        online_eval_transform=transform,
+        data_dir=Path(data_cfg["data_dir"]),
+        train_dir=data_cfg.get("train_dir"),
+        no_labels=False,
+    )
+    limit = cfg["data"].get("offline_limit_examples")
+    if limit:
+        train_dataset = limit_subset(
+            train_dataset,
+            int(limit),
+            seed=int(cfg["experiment"]["seed"]) + 50_000,
+        )
+    return train_dataset
+
+
+def build_pretrain_loader(cfg: Dict, dataset: Dataset, batch_size: int = None) -> DataLoader:
+    return DataLoader(
+        dataset,
+        batch_size=batch_size or int(cfg["data"]["query_batch_size"]),
+        shuffle=True,
+        num_workers=int(cfg["data"].get("num_workers", 0)),
+        pin_memory=torch.cuda.is_available(),
+        drop_last=bool(cfg["data"].get("drop_last", True)),
+    )
+
+
 def limit_subset(dataset: Dataset, limit: int, seed: int) -> Dataset:
     n = min(limit, len(dataset))
     perm = torch.randperm(len(dataset), generator=torch.Generator().manual_seed(seed))[:n]

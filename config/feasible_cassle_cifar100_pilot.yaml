@@ -4,6 +4,7 @@ experiment:
   seed: 5
   device: auto
   notebook_default_methods:
+    - offline_ssl
     - finetune
     - standard_cassle
     - crossfit_cassle
@@ -19,6 +20,7 @@ data:
   query_batch_size: 128
   drop_last: true
   limit_examples_per_task:
+  offline_limit_examples:
 
 augmentations:
   brightness: 0.8
@@ -54,6 +56,8 @@ training:
   task1_epochs: 25
   epochs_per_task: 25
   max_query_updates_per_task: 0
+  offline_epochs: 25
+  offline_max_query_updates: 0
 
 optimization:
   lr: 0.03
@@ -84,3 +88,16 @@ evaluation:
   max_distance_matrix_size: 5000000
   max_eval_train_examples:
   max_eval_test_examples:
+
+linear_eval:
+  enabled: true
+  epochs: 100
+  batch_size: 256
+  lr: 1.0
+  momentum: 0.0
+  weight_decay: 0.0
+  scheduler: step
+  lr_decay_steps: [60, 80]
+  max_train_examples:
+  max_test_examples:
+  log_frequency: 10

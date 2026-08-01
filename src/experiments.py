@@ -37,10 +37,12 @@ def prepare_run(config_path: str, overrides: Dict = None):
 def run_smoke(config_path: str) -> Dict:
     cfg, device, run_dir, tasks = prepare_run(config_path)
     try:
-        task1 = train_task1(cfg, run_dir, device, tasks)
+        methods = cfg["experiment"].get("methods", ["feasible_cassle"])
+        task1 = None if set(methods) == {"offline_ssl"} else train_task1(cfg, run_dir, device, tasks)
         summaries = []
-        for method in cfg["experiment"].get("methods", ["feasible_cassle"]):
+        for method in methods:
             summaries.append(run_method(cfg, run_dir, method, task1, device, tasks))
+        write_accuracy_summary(run_dir, summaries)
         payload = {"run_dir": str(run_dir), "summaries": summaries}
         save_json(run_dir / "smoke_summary.json", payload)
         return payload
@@ -53,12 +55,13 @@ def run_smoke(config_path: str) -> Dict:
 def run_pilot_selection(config_path: str, methods: List[str] = None) -> Dict:
     cfg, device, run_dir, tasks = prepare_run(config_path)
     try:
-        task1 = train_task1(cfg, run_dir, device, tasks)
         selected = methods or cfg["experiment"].get(
             "notebook_default_methods",
             ["finetune", "standard_cassle", "crossfit_cassle", "feasible_cassle"],
         )
+        task1 = None if set(selected) == {"offline_ssl"} else train_task1(cfg, run_dir, device, tasks)
         summaries = [run_method(cfg, run_dir, method, task1, device, tasks) for method in selected]
+        write_accuracy_summary(run_dir, summaries)
         payload = {"run_dir": str(run_dir), "summaries": summaries}
         save_json(run_dir / "pilot_summary.json", payload)
         return payload
@@ -81,6 +84,40 @@ def load_results(run_dir: str) -> Dict:
         with path.open() as f:
             payload["summaries"][path.parent.name] = json.load(f)
     return payload
+
+
+def write_accuracy_summary(run_dir: Path, summaries: List[Dict]) -> None:
+    rows = []
+    for summary in summaries:
+        method = summary["method"]
+        if method == "offline_ssl":
+            row = {
+                "method": method,
+                "task": "offline",
+                "current_task_accuracy": "",
+                "avg_seen_accuracy": "",
+                "avg_forgetting_accuracy_drop": "",
+            }
+            row.update(summary.get("knn_eval", {}))
+            row.update(summary.get("linear_eval", {}))
+            rows.append(row)
+            continue
+        for eval_row in summary.get("eval_history", []):
+            row = {"method": method, **eval_row}
+            if eval_row.get("task") == max(r.get("task", -1) for r in summary.get("eval_history", [])):
+                row.update(summary.get("final_linear_eval", {}))
+            rows.append(row)
+    if not rows:
+        return
+    fieldnames = []
+    for row in rows:
+        for key in row:
+            if key not in fieldnames:
+                fieldnames.append(key)
+    with (run_dir / "accuracy_summary.csv").open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def inspect_one_update(config_path: str) -> Dict:
@@ -136,13 +173,13 @@ def inspect_one_update(config_path: str) -> Dict:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
-    parser.add_argument("--run", choices=["smoke", "pilot", "inspect"], default="smoke")
+    parser.add_argument("--run", choices=["smoke", "pilot", "confirm", "inspect"], default="smoke")
     parser.add_argument("--methods", nargs="*", default=None)
     args = parser.parse_args()
     try:
         if args.run == "smoke":
             result = run_smoke(args.config)
-        elif args.run == "pilot":
+        elif args.run in {"pilot", "confirm"}:
             result = run_pilot_selection(args.config, methods=args.methods)
         else:
             result = inspect_one_update(args.config)
