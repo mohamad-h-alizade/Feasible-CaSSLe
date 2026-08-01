@@ -47,6 +47,8 @@ from src.utils import (
     frozen_params,
     peak_memory_mb,
     preserve_batchnorm_stats,
+    progress_interval,
+    progress_print,
     reset_peak_memory,
     save_json,
 )
@@ -147,6 +149,7 @@ def train_task1(cfg: Dict, run_dir: Path, device: torch.device, tasks) -> Path:
     rows = []
     step = 0
     reset_peak_memory(device)
+    progress_print(cfg, "[shared] train task0 ordinary SSL")
     for _ in range(int(cfg["training"].get("task1_epochs", cfg["training"]["epochs_per_task"]))):
         batches = make_batches(cfg, 0, tasks)
         steps_this_epoch = len(build_support_query_loader(cfg, build_pretrain_dataset(cfg, tasks, 0)))
@@ -166,6 +169,8 @@ def train_task1(cfg: Dict, run_dir: Path, device: torch.device, tasks) -> Path:
                     "peak_memory_mb": peak_memory_mb(device),
                 }
             )
+            if step % progress_interval(cfg) == 0:
+                progress_print(cfg, f"[shared] step={step} S_Q={float(ssl.detach().cpu()):.4f}")
             step += 1
             if step >= max_steps:
                 break
@@ -184,6 +189,7 @@ def train_task1(cfg: Dict, run_dir: Path, device: torch.device, tasks) -> Path:
     )
     for row in rows:
         append_csv(run_dir / "shared" / "train_log.csv", row)
+    progress_print(cfg, f"[shared] saved {ckpt_path}")
     return ckpt_path
 
 
@@ -200,6 +206,11 @@ def train_offline_ssl(cfg: Dict, run_dir: Path, device: torch.device, tasks) -> 
     max_steps = int(cfg["training"].get("offline_max_query_updates", 0) or 10**12)
     step = 0
     reset_peak_memory(device)
+    progress_print(
+        cfg,
+        f"[offline_ssl] train joint SSL epochs={epochs} "
+        f"max_steps={max_steps if max_steps < 10**12 else 'all'}",
+    )
     for _ in range(epochs):
         for _, views, _ in loader:
             x1, x2 = views[0].to(device), views[1].to(device)
@@ -217,6 +228,8 @@ def train_offline_ssl(cfg: Dict, run_dir: Path, device: torch.device, tasks) -> 
                     "peak_memory_mb": peak_memory_mb(device),
                 },
             )
+            if step % progress_interval(cfg) == 0:
+                progress_print(cfg, f"[offline_ssl] step={step} S_Q={float(ssl.detach().cpu()):.4f}")
             step += 1
             if step >= max_steps:
                 break
@@ -234,10 +247,18 @@ def train_offline_ssl(cfg: Dict, run_dir: Path, device: torch.device, tasks) -> 
         },
         ckpt,
     )
-    knn = evaluate_after_task(cfg, model, tasks, int(cfg["training"]["num_tasks"]) - 1, device)
-    linear = run_linear_eval(cfg, model, tasks, device, method_dir, tag="offline_ssl")
-    summary = {"method": "offline_ssl", "checkpoint": str(ckpt), "knn_eval": knn, "linear_eval": linear}
+    eval_result = evaluate_model(
+        cfg,
+        model,
+        tasks,
+        int(cfg["training"]["num_tasks"]) - 1,
+        device,
+        method_dir,
+        tag="offline_ssl",
+    )
+    summary = {"method": "offline_ssl", "checkpoint": str(ckpt), "eval": eval_result}
     save_json(method_dir / "summary.json", summary)
+    progress_print(cfg, "[offline_ssl] done")
     return summary
 
 
@@ -256,15 +277,17 @@ def run_method(
 
     method_dir = run_dir / method
     method_dir.mkdir(parents=True, exist_ok=False)
+    progress_print(cfg, f"[{method}] start")
     adapter = TemporalLossAdapter.from_config(cfg)
     model = build_model(cfg, tasks=tasks, task_idx=0).to(device)
     load_model_state(model, str(task1_checkpoint))
     eval_history: List[Dict[str, float]] = []
-    eval_history.append(evaluate_after_task(cfg, model, tasks, 0, device))
+    eval_history.append(evaluate_model(cfg, model, tasks, 0, device, method_dir, tag=f"{method}_task0"))
     append_csv(method_dir / "eval_log.csv", {"method": method, **eval_history[-1]})
 
     prev_ckpt = task1_checkpoint
     for task_idx in range(1, int(cfg["training"]["num_tasks"])):
+        progress_print(cfg, f"[{method}] task={task_idx} load previous checkpoint")
         load_model_state(model, str(prev_ckpt))
         model.current_task_idx = task_idx
         historical = freeze_historical_model(model).to(device)
@@ -276,6 +299,7 @@ def run_method(
         batches = make_batches(cfg, task_idx, tasks)
         calibration = None
         if method in {"crossfit_cassle", "feasible_cassle", "compute_matched_finetune"}:
+            progress_print(cfg, f"[{method}] task={task_idx} calibrate temporal predictor")
             calibration = calibrate_task(
                 cfg,
                 model,
@@ -318,23 +342,24 @@ def run_method(
             task_ckpt,
         )
         prev_ckpt = task_ckpt
-        eval_history.append(evaluate_after_task(cfg, model, tasks, task_idx, device))
+        eval_history.append(
+            evaluate_model(cfg, model, tasks, task_idx, device, method_dir, tag=f"{method}_task{task_idx}")
+        )
         eval_history[-1]["avg_forgetting"] = summarize_forgetting(eval_history, task_idx)
         eval_history[-1]["avg_forgetting_accuracy_drop"] = eval_history[-1]["avg_forgetting"]
         append_csv(method_dir / "eval_log.csv", {"method": method, **eval_history[-1]})
+        progress_print(
+            cfg,
+            f"[{method}] task={task_idx} eval={eval_history[-1].get('evaluator', 'unknown')} "
+            f"accuracy={eval_history[-1].get('accuracy', eval_history[-1]['current_task_accuracy']):.3f}% "
+            f"current={eval_history[-1]['current_task_accuracy']:.3f}% "
+            f"avg_seen={eval_history[-1]['avg_seen_accuracy']:.3f}% "
+            f"forget={eval_history[-1]['avg_forgetting_accuracy_drop']:.3f}",
+        )
 
     summary = {"method": method, "eval_history": eval_history}
-    final_linear = run_linear_eval(
-        cfg,
-        model,
-        tasks,
-        device,
-        method_dir,
-        tag=f"{method}_task{int(cfg['training']['num_tasks']) - 1}",
-    )
-    if final_linear:
-        summary["final_linear_eval"] = final_linear
     save_json(method_dir / "summary.json", summary)
+    progress_print(cfg, f"[{method}] done")
     return summary
 
 
@@ -364,6 +389,7 @@ def train_task_increment(
     total_steps = min(max_steps, epochs * steps_per_epoch)
     early_steps = int(total_steps * float(cfg["temporal"].get("predictor_early_fraction", 0.10)))
     reset_peak_memory(device)
+    progress_print(cfg, f"[{method}] task={task_idx} train steps={total_steps}")
 
     for step in range(total_steps):
         batch = move_batch(next(batches), device)
@@ -463,9 +489,37 @@ def train_task_increment(
         row["wall_time_s"] = time.time() - start_time
         row["peak_memory_mb"] = peak_memory_mb(device)
         append_csv(method_dir / "train_log.csv", row)
+        if step % progress_interval(cfg) == 0 or step == total_steps - 1:
+            msg = f"[{method}] task={task_idx} step={step + 1}/{total_steps} S_Q={row['S_Q']:.4f}"
+            if row["D_Q_raw"] != "":
+                msg += f" D={row['D_Q_raw']:.4f}"
+            if row["R_Q"] != "":
+                msg += (
+                    f" R={row['R_Q']:.4f} active={row.get('active')} "
+                    f"corr={row.get('correction_ratio'):.4f}"
+                )
+            progress_print(cfg, msg)
+
+
+def evaluate_model(
+    cfg: Dict,
+    model: nn.Module,
+    tasks,
+    task_idx: int,
+    device: torch.device,
+    out_dir: Path,
+    tag: str,
+) -> Dict:
+    method = cfg.get("evaluation", {}).get("method", "linear").lower()
+    if method == "linear":
+        return run_linear_eval(cfg, model, tasks, device, out_dir, tag=tag, seen_task_idx=task_idx)
+    if method == "knn":
+        return evaluate_after_task(cfg, model, tasks, task_idx, device)
+    raise ValueError("evaluation.method must be either 'linear' or 'knn'")
 
 
 def evaluate_after_task(cfg: Dict, model: nn.Module, tasks, task_idx: int, device: torch.device) -> Dict:
+    progress_print(cfg, f"[eval:knn] task={task_idx} start")
     train_eval, test_eval = build_eval_datasets(cfg)
     batch_size = int(cfg["evaluation"].get("batch_size", 256))
     num_workers = int(cfg["data"].get("num_workers", 0))
@@ -517,6 +571,14 @@ def evaluate_after_task(cfg: Dict, model: nn.Module, tasks, task_idx: int, devic
     )
     result["current_task_knn"] = result[f"knn_task{task_idx}"]
     result["avg_seen_knn"] = sum(task_accs) / max(len(task_accs), 1)
+    result["evaluator"] = "knn"
+    result["accuracy"] = result["knn_seen"]
     result["current_task_accuracy"] = result["current_task_knn"]
     result["avg_seen_accuracy"] = result["avg_seen_knn"]
+    progress_print(
+        cfg,
+        f"[eval] evaluator=knn task={task_idx} accuracy={result['accuracy']:.3f}% "
+        f"current={result['current_task_accuracy']:.3f}% "
+        f"avg_seen={result['avg_seen_accuracy']:.3f}%",
+    )
     return result

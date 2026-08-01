@@ -86,11 +86,16 @@ temporal:
   epsilon_num: 1.0e-8
 
 evaluation:
+  method: linear
   knn_k: 20
   batch_size: 256
   max_distance_matrix_size: 5000000
   max_eval_train_examples: 512
   max_eval_test_examples: 256
+
+logging:
+  progress: true
+  progress_interval: 1
 
 linear_eval:
   enabled: true

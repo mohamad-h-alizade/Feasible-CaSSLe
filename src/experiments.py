@@ -15,7 +15,7 @@ from src.models import representation_parameters
 from src.qp import grads_or_zeros, solve_feasible_step
 from src.temporal_losses import TemporalLossAdapter, normalized_reconstruction
 from src.trainer import _simclr_query_losses, make_batches, run_method, train_task1
-from src.utils import choose_device, git_commit, make_run_dir, save_json, set_seed
+from src.utils import choose_device, git_commit, make_run_dir, progress_print, save_json, set_seed
 
 
 def prepare_run(config_path: str, overrides: Dict = None):
@@ -31,6 +31,8 @@ def prepare_run(config_path: str, overrides: Dict = None):
         num_tasks=int(cfg["training"]["num_tasks"]),
     )
     save_json(run_dir / "class_order.json", {"tasks": [task.tolist() for task in tasks]})
+    progress_print(cfg, f"[run] dir={run_dir}")
+    progress_print(cfg, f"[run] device={device}")
     return cfg, device, run_dir, tasks
 
 
@@ -38,6 +40,7 @@ def run_smoke(config_path: str) -> Dict:
     cfg, device, run_dir, tasks = prepare_run(config_path)
     try:
         methods = cfg["experiment"].get("methods", ["feasible_cassle"])
+        progress_print(cfg, f"[run] methods={methods}")
         task1 = None if set(methods) == {"offline_ssl"} else train_task1(cfg, run_dir, device, tasks)
         summaries = []
         for method in methods:
@@ -60,6 +63,7 @@ def run_pilot_selection(config_path: str, methods: List[str] = None) -> Dict:
             "notebook_default_methods",
             ["finetune", "standard_cassle", "crossfit_cassle", "feasible_cassle"],
         )
+        progress_print(cfg, f"[run] methods={selected}")
         task1 = None if set(selected) == {"offline_ssl"} else train_task1(cfg, run_dir, device, tasks)
         summaries = [run_method(cfg, run_dir, method, task1, device, tasks) for method in selected]
         write_accuracy_summary(run_dir, summaries)
@@ -90,6 +94,15 @@ def load_results(run_dir: str) -> Dict:
 
 def write_accuracy_summary(run_dir: Path, summaries: List[Dict]) -> None:
     rows = []
+    preferred = [
+        "method",
+        "task",
+        "evaluator",
+        "accuracy",
+        "current_task_accuracy",
+        "avg_seen_accuracy",
+        "avg_forgetting_accuracy_drop",
+    ]
     for summary in summaries:
         method = summary["method"]
         if method == "offline_ssl":
@@ -100,18 +113,18 @@ def write_accuracy_summary(run_dir: Path, summaries: List[Dict]) -> None:
                 "avg_seen_accuracy": "",
                 "avg_forgetting_accuracy_drop": "",
             }
-            row.update(summary.get("knn_eval", {}))
-            row.update(summary.get("linear_eval", {}))
+            row.update(summary.get("eval", {}))
             rows.append(row)
             continue
         for eval_row in summary.get("eval_history", []):
             row = {"method": method, **eval_row}
-            if eval_row.get("task") == max(r.get("task", -1) for r in summary.get("eval_history", [])):
-                row.update(summary.get("final_linear_eval", {}))
             rows.append(row)
     if not rows:
         return
     fieldnames = []
+    for key in preferred:
+        if any(key in row for row in rows):
+            fieldnames.append(key)
     for row in rows:
         for key in row:
             if key not in fieldnames:

@@ -84,9 +84,16 @@ python -m src.experiments \
 - `feasible_cassle`: takes the SSL step when it satisfies the normalized temporal budget, otherwise applies the QP correction.
 - `compute_matched_finetune`: spends comparable support-side compute but updates the encoder only with SSL.
 
-## 6. Linear Evaluation
+## 6. Evaluation
 
-The PoC trains a frozen-feature linear classifier directly from each final checkpoint. Pilot and confirm defaults mirror the original CaSSLe linear scripts where practical:
+The PoC runs one evaluator per run. The configs default to paper-style linear evaluation:
+
+```yaml
+evaluation:
+  method: linear
+```
+
+Set `evaluation.method: knn` if you want weighted k-NN instead. Linear evaluation trains a frozen-feature classifier after each task on the classes seen so far. Pilot and confirm defaults mirror the original CaSSLe linear scripts where practical:
 
 ```yaml
 epochs: 100
@@ -102,7 +109,7 @@ Linear outputs are saved in each method folder:
 
 ```text
 linear_eval_log.csv
-<method>_task4_linear_eval.json
+<method>_taskX_linear_eval.json
 ```
 
 `offline_ssl` writes:
@@ -112,6 +119,14 @@ offline_ssl_linear_eval.json
 ```
 
 ## 7. Logs
+
+Runs print live progress to stdout by default: run directory, device, selected methods, training step losses, the selected evaluator's accuracy, and linear-eval loss/top-1 when `evaluation.method: linear`. Control verbosity in each config:
+
+```yaml
+logging:
+  progress: true
+  progress_interval: 25
+```
 
 Each run directory contains:
 
@@ -126,12 +141,14 @@ shared/task0.ckpt
 
 Important accuracy fields:
 
-- `current_task_accuracy`: linear or k-NN accuracy on the task just learned.
+- `current_task_accuracy`: selected evaluator accuracy on the task just learned.
 - `avg_seen_accuracy`: mean accuracy over all tasks seen so far.
 - `avg_forgetting_accuracy_drop`: mean drop on previous tasks from their best earlier score.
+- `evaluator`: selected evaluation backend, either `linear` or `knn`.
+- `accuracy`: selected evaluator's aggregate seen-class accuracy for that row.
 - `linear_top1`: final all-class linear top-1 accuracy.
 - `linear_taskX`: final linear top-1 accuracy on task `X` classes.
-- `accuracy_summary.csv`: run-level table combining k-NN and linear metrics across methods.
+- `accuracy_summary.csv`: run-level table with neutral accuracy columns first, followed by backend-specific details.
 
 Important Feasible diagnostics:
 

@@ -188,3 +188,16 @@ def peak_memory_mb(device: torch.device) -> float:
 def reset_peak_memory(device: torch.device) -> None:
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
+
+
+def progress_enabled(cfg: Mapping) -> bool:
+    return bool(cfg.get("logging", {}).get("progress", True))
+
+
+def progress_interval(cfg: Mapping) -> int:
+    return max(1, int(cfg.get("logging", {}).get("progress_interval", 10)))
+
+
+def progress_print(cfg: Mapping, message: str) -> None:
+    if progress_enabled(cfg):
+        print(message, flush=True)
