@@ -1,7 +1,9 @@
+import random
 import time
 from pathlib import Path
 from typing import Dict, Iterator, List, Sequence
 
+import numpy as np
 import torch
 from torch import nn
 
@@ -51,6 +53,7 @@ from src.utils import (
     progress_print,
     reset_peak_memory,
     save_json,
+    set_seed,
 )
 
 
@@ -62,6 +65,33 @@ METHODS = {
     "feasible_cassle",
     "compute_matched_finetune",
 }
+
+
+EVAL_LOG_KEYS = [
+    "task",
+    "evaluator",
+    "accuracy",
+    "current_task_accuracy",
+    "avg_seen_accuracy",
+    "isolated_task_accuracy",
+    "learning_forward_transfer_accuracy",
+    "learning_fwt_baseline",
+    "avg_forgetting_accuracy_drop",
+]
+
+
+def _eval_log_row(method: str, result: Dict) -> Dict:
+    row = {"method": method}
+    for key in EVAL_LOG_KEYS:
+        row[key] = result.get(key, "")
+    for key, value in result.items():
+        if key not in row:
+            row[key] = value
+    return row
+
+
+def _learning_fwt_enabled(cfg: Dict) -> bool:
+    return bool(cfg.get("evaluation", {}).get("learning_forward_transfer", True))
 
 
 def make_batches(cfg: Dict, task_idx: int, tasks: Sequence[torch.Tensor]):
@@ -193,6 +223,103 @@ def train_task1(cfg: Dict, run_dir: Path, device: torch.device, tasks) -> Path:
     return ckpt_path
 
 
+def _rng_state():
+    return {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch": torch.random.get_rng_state(),
+        "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+    }
+
+
+def _restore_rng_state(state: Dict) -> None:
+    random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    torch.random.set_rng_state(state["torch"])
+    if state["cuda"] is not None:
+        torch.cuda.set_rng_state_all(state["cuda"])
+
+
+def train_isolated_learning_fwt_baselines(
+    cfg: Dict,
+    run_dir: Path,
+    device: torch.device,
+    tasks,
+) -> Dict[int, Dict]:
+    if not _learning_fwt_enabled(cfg):
+        return {}
+
+    num_tasks = int(cfg["training"]["num_tasks"])
+    root = run_dir / "learning_fwt_isolated"
+    root.mkdir(parents=True, exist_ok=False)
+    baselines: Dict[int, Dict] = {}
+    progress_print(cfg, "[learning_fwt] train isolated task baselines")
+    saved_rng = _rng_state()
+    try:
+        for task_idx in range(1, num_tasks):
+            task_dir = root / f"task{task_idx}"
+            task_dir.mkdir(parents=True, exist_ok=False)
+            set_seed(int(cfg["experiment"]["seed"]))
+            model = build_model(cfg, tasks=tasks, task_idx=task_idx).to(device)
+            params = representation_parameters(model)
+            lr = float(cfg["optimization"]["lr"])
+            weight_decay = float(cfg["optimization"].get("weight_decay", 0.0))
+            max_steps = int(cfg["training"].get("max_query_updates_per_task", 0) or 10**12)
+            epochs = int(cfg["training"]["epochs_per_task"])
+            batches = make_batches(cfg, task_idx, tasks)
+            steps_per_epoch = len(build_support_query_loader(cfg, build_pretrain_dataset(cfg, tasks, task_idx)))
+            total_steps = min(max_steps, epochs * steps_per_epoch)
+            reset_peak_memory(device)
+            progress_print(cfg, f"[learning_fwt] isolated task={task_idx} train steps={total_steps}")
+            for step in range(total_steps):
+                batch = move_batch(next(batches), device)
+                ssl, _, _ = _simclr_query_losses(cfg, model, None, None, None, batch.query_views)
+                assert_finite_tensor("isolated_ssl_loss", ssl)
+                grads = grads_or_zeros(ssl, params)
+                apply_updates(params, _sgd_updates(params, grads, lr, weight_decay))
+                update_momentum_targets(model, tau=0.99)
+                append_csv(
+                    task_dir / "train_log.csv",
+                    {
+                        "task": task_idx,
+                        "step": step,
+                        "method": "learning_fwt_isolated",
+                        "S_Q": float(ssl.detach().cpu()),
+                        "peak_memory_mb": peak_memory_mb(device),
+                    },
+                )
+                if step % progress_interval(cfg) == 0 or step == total_steps - 1:
+                    progress_print(
+                        cfg,
+                        f"[learning_fwt] isolated task={task_idx} step={step + 1}/{total_steps} "
+                        f"S_Q={float(ssl.detach().cpu()):.4f}",
+                    )
+
+            torch.save(
+                {
+                    **checkpoint_state(model),
+                    "task_idx": task_idx,
+                    "method": "learning_fwt_isolated",
+                    "class_order": [task.tolist() for task in tasks],
+                    "config": cfg,
+                },
+                task_dir / "task.ckpt",
+            )
+            result = evaluate_single_task(cfg, model, tasks, task_idx, device, task_dir, tag=f"isolated_task{task_idx}")
+            result["task"] = task_idx
+            result["baseline"] = cfg.get("evaluation", {}).get(
+                "learning_forward_transfer_baseline",
+                "isolated_task_first",
+            )
+            append_csv(root / "eval_log.csv", _eval_log_row("learning_fwt_isolated", result))
+            baselines[task_idx] = result
+
+        save_json(root / "summary.json", {"baselines": {str(k): v for k, v in baselines.items()}})
+        return baselines
+    finally:
+        _restore_rng_state(saved_rng)
+
+
 def train_offline_ssl(cfg: Dict, run_dir: Path, device: torch.device, tasks) -> Dict:
     method_dir = run_dir / "offline_ssl"
     method_dir.mkdir(parents=True, exist_ok=False)
@@ -269,6 +396,7 @@ def run_method(
     task1_checkpoint: Path,
     device: torch.device,
     tasks,
+    learning_fwt_baselines: Dict[int, Dict] = None,
 ) -> Dict:
     if method not in METHODS:
         raise ValueError(f"Unknown method {method}; choose from {sorted(METHODS)}")
@@ -281,9 +409,10 @@ def run_method(
     adapter = TemporalLossAdapter.from_config(cfg)
     model = build_model(cfg, tasks=tasks, task_idx=0).to(device)
     load_model_state(model, str(task1_checkpoint))
+    learning_fwt_baselines = learning_fwt_baselines or {}
     eval_history: List[Dict[str, float]] = []
     eval_history.append(evaluate_model(cfg, model, tasks, 0, device, method_dir, tag=f"{method}_task0"))
-    append_csv(method_dir / "eval_log.csv", {"method": method, **eval_history[-1]})
+    append_csv(method_dir / "eval_log.csv", _eval_log_row(method, eval_history[-1]))
 
     prev_ckpt = task1_checkpoint
     for task_idx in range(1, int(cfg["training"]["num_tasks"])):
@@ -345,16 +474,18 @@ def run_method(
         eval_history.append(
             evaluate_model(cfg, model, tasks, task_idx, device, method_dir, tag=f"{method}_task{task_idx}")
         )
+        add_learning_fwt_metrics(eval_history[-1], learning_fwt_baselines)
         eval_history[-1]["avg_forgetting"] = summarize_forgetting(eval_history, task_idx)
         eval_history[-1]["avg_forgetting_accuracy_drop"] = eval_history[-1]["avg_forgetting"]
-        append_csv(method_dir / "eval_log.csv", {"method": method, **eval_history[-1]})
+        append_csv(method_dir / "eval_log.csv", _eval_log_row(method, eval_history[-1]))
         progress_print(
             cfg,
             f"[{method}] task={task_idx} eval={eval_history[-1].get('evaluator', 'unknown')} "
             f"accuracy={eval_history[-1].get('accuracy', eval_history[-1]['current_task_accuracy']):.3f}% "
             f"current={eval_history[-1]['current_task_accuracy']:.3f}% "
             f"avg_seen={eval_history[-1]['avg_seen_accuracy']:.3f}% "
-            f"forget={eval_history[-1]['avg_forgetting_accuracy_drop']:.3f}",
+            f"forget={eval_history[-1]['avg_forgetting_accuracy_drop']:.3f} "
+            f"learning_fwt={eval_history[-1].get('learning_forward_transfer_accuracy', '')}",
         )
 
     summary = {"method": method, "eval_history": eval_history}
@@ -501,6 +632,48 @@ def train_task_increment(
             progress_print(cfg, msg)
 
 
+def add_learning_fwt_metrics(result: Dict, baselines: Dict[int, Dict]) -> None:
+    task_idx = result.get("task")
+    if task_idx is None or task_idx not in baselines:
+        return
+    baseline = baselines[task_idx]
+    baseline_accuracy = float(baseline["current_task_accuracy"])
+    learning_fwt = float(result["current_task_accuracy"]) - baseline_accuracy
+    result["isolated_task_accuracy"] = baseline_accuracy
+    result["learning_forward_transfer_accuracy"] = learning_fwt
+    result[f"learning_fwt_task{task_idx}"] = learning_fwt
+    result["learning_fwt_baseline"] = baseline.get("baseline", "isolated_task_first")
+
+
+def evaluate_single_task(
+    cfg: Dict,
+    model: nn.Module,
+    tasks,
+    task_idx: int,
+    device: torch.device,
+    out_dir: Path,
+    tag: str,
+) -> Dict:
+    method = cfg.get("evaluation", {}).get("method", "linear").lower()
+    if method == "linear":
+        result = run_linear_eval(cfg, model, tasks, device, out_dir, tag=tag, task_indices=[task_idx])
+        result["task"] = task_idx
+        result["current_task_accuracy"] = result[f"linear_task{task_idx}"]
+        result["avg_seen_accuracy"] = result["current_task_accuracy"]
+        return result
+    if method == "knn":
+        acc = evaluate_single_task_knn(cfg, model, tasks, task_idx, device)
+        return {
+            "task": task_idx,
+            "evaluator": "knn",
+            "accuracy": acc,
+            "current_task_accuracy": acc,
+            "avg_seen_accuracy": acc,
+            f"knn_task{task_idx}": acc,
+        }
+    raise ValueError("evaluation.method must be either 'linear' or 'knn'")
+
+
 def evaluate_model(
     cfg: Dict,
     model: nn.Module,
@@ -516,6 +689,44 @@ def evaluate_model(
     if method == "knn":
         return evaluate_after_task(cfg, model, tasks, task_idx, device)
     raise ValueError("evaluation.method must be either 'linear' or 'knn'")
+
+
+def evaluate_single_task_knn(
+    cfg: Dict,
+    model: nn.Module,
+    tasks,
+    task_idx: int,
+    device: torch.device,
+) -> float:
+    train_eval, test_eval = build_eval_datasets(cfg)
+    batch_size = int(cfg["evaluation"].get("batch_size", 256))
+    num_workers = int(cfg["data"].get("num_workers", 0))
+    max_train = cfg["evaluation"].get("max_eval_train_examples")
+    max_test = cfg["evaluation"].get("max_eval_test_examples")
+    classes = task_classes(tasks, task_idx)
+    train_task = class_subset(train_eval, classes)
+    test_task = class_subset(test_eval, classes)
+    if max_train:
+        train_task = limit_subset(
+            train_task,
+            int(max_train),
+            seed=int(cfg["experiment"]["seed"]) + 40_000 + task_idx,
+        )
+    if max_test:
+        test_task = limit_subset(
+            test_task,
+            int(max_test),
+            seed=int(cfg["experiment"]["seed"]) + 50_000 + task_idx,
+        )
+    train_features, train_targets = encode_dataset(model, train_task, device, batch_size, num_workers)
+    test_features, test_targets = encode_dataset(model, test_task, device, batch_size, num_workers)
+    return weighted_knn_accuracy(
+        train_features,
+        train_targets,
+        test_features,
+        test_targets,
+        k=int(cfg["evaluation"].get("knn_k", 20)),
+    )
 
 
 def evaluate_after_task(cfg: Dict, model: nn.Module, tasks, task_idx: int, device: torch.device) -> Dict:

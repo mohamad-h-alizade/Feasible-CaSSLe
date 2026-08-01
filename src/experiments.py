@@ -14,7 +14,13 @@ from src.models import build_model, build_temporal_predictor, freeze_historical_
 from src.models import representation_parameters
 from src.qp import grads_or_zeros, solve_feasible_step
 from src.temporal_losses import TemporalLossAdapter, normalized_reconstruction
-from src.trainer import _simclr_query_losses, make_batches, run_method, train_task1
+from src.trainer import (
+    _simclr_query_losses,
+    make_batches,
+    run_method,
+    train_isolated_learning_fwt_baselines,
+    train_task1,
+)
 from src.utils import choose_device, git_commit, make_run_dir, progress_print, save_json, set_seed
 
 
@@ -42,9 +48,14 @@ def run_smoke(config_path: str) -> Dict:
         methods = cfg["experiment"].get("methods", ["feasible_cassle"])
         progress_print(cfg, f"[run] methods={methods}")
         task1 = None if set(methods) == {"offline_ssl"} else train_task1(cfg, run_dir, device, tasks)
+        learning_fwt = (
+            {}
+            if set(methods) == {"offline_ssl"}
+            else train_isolated_learning_fwt_baselines(cfg, run_dir, device, tasks)
+        )
         summaries = []
         for method in methods:
-            summaries.append(run_method(cfg, run_dir, method, task1, device, tasks))
+            summaries.append(run_method(cfg, run_dir, method, task1, device, tasks, learning_fwt))
         write_accuracy_summary(run_dir, summaries)
         write_diagnostics_summary(run_dir)
         payload = {"run_dir": str(run_dir), "summaries": summaries}
@@ -65,7 +76,12 @@ def run_pilot_selection(config_path: str, methods: List[str] = None) -> Dict:
         )
         progress_print(cfg, f"[run] methods={selected}")
         task1 = None if set(selected) == {"offline_ssl"} else train_task1(cfg, run_dir, device, tasks)
-        summaries = [run_method(cfg, run_dir, method, task1, device, tasks) for method in selected]
+        learning_fwt = (
+            {}
+            if set(selected) == {"offline_ssl"}
+            else train_isolated_learning_fwt_baselines(cfg, run_dir, device, tasks)
+        )
+        summaries = [run_method(cfg, run_dir, method, task1, device, tasks, learning_fwt) for method in selected]
         write_accuracy_summary(run_dir, summaries)
         write_diagnostics_summary(run_dir)
         payload = {"run_dir": str(run_dir), "summaries": summaries}
@@ -101,6 +117,9 @@ def write_accuracy_summary(run_dir: Path, summaries: List[Dict]) -> None:
         "accuracy",
         "current_task_accuracy",
         "avg_seen_accuracy",
+        "isolated_task_accuracy",
+        "learning_forward_transfer_accuracy",
+        "learning_fwt_baseline",
         "avg_forgetting_accuracy_drop",
     ]
     for summary in summaries:

@@ -86,6 +86,8 @@ temporal:
 
 evaluation:
   method: linear
+  learning_forward_transfer: true
+  learning_forward_transfer_baseline: isolated_task_first
   knn_k: 20
   batch_size: 256
   max_distance_matrix_size: 5000000

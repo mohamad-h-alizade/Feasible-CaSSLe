@@ -7,11 +7,9 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from src.data import build_eval_datasets, class_subset, limit_subset
-from src.metrics import task_classes
 from src.utils import append_csv, progress_interval, progress_print, save_json
 
 
-@torch.no_grad()
 def _label_map(classes, device):
     mapping = torch.full((100,), -1, dtype=torch.long, device=device)
     for idx, cls in enumerate(classes):
@@ -19,13 +17,14 @@ def _label_map(classes, device):
     return mapping
 
 
-def _linear_eval_accuracy(backbone, classifier, loader, device, tasks, class_map):
+@torch.no_grad()
+def _linear_eval_accuracy(backbone, classifier, loader, device, task_items, class_map):
     backbone.eval()
     classifier.eval()
     correct = 0
     total = 0
-    task_correct = {idx: 0 for idx in range(len(tasks))}
-    task_total = {idx: 0 for idx in range(len(tasks))}
+    task_correct = {idx: 0 for idx, _ in task_items}
+    task_total = {idx: 0 for idx, _ in task_items}
     for x, y in loader:
         x = x.to(device)
         y = y.to(device)
@@ -36,7 +35,7 @@ def _linear_eval_accuracy(backbone, classifier, loader, device, tasks, class_map
         correct_mask = pred[valid].eq(mapped_y[valid])
         correct += int(correct_mask.sum())
         total += int(valid.sum())
-        for idx, cls in enumerate(tasks):
+        for idx, cls in task_items:
             cls_tensor = cls.to(device)
             mask = torch.isin(y, cls_tensor)
             if int(mask.sum()) == 0:
@@ -45,7 +44,7 @@ def _linear_eval_accuracy(backbone, classifier, loader, device, tasks, class_map
             task_correct[idx] += int(pred[mask].eq(mapped_task_y).sum())
             task_total[idx] += int(mask.sum())
     out = {"linear_top1": 100.0 * correct / max(total, 1)}
-    for idx in range(len(tasks)):
+    for idx, _ in task_items:
         if task_total[idx]:
             out[f"linear_task{idx}"] = 100.0 * task_correct[idx] / task_total[idx]
     return out
@@ -59,13 +58,20 @@ def run_linear_eval(
     out_dir: Path,
     tag: str,
     seen_task_idx: int = None,
+    task_indices: Sequence[int] = None,
 ) -> Dict:
     lin_cfg = cfg.get("linear_eval", {})
     if not lin_cfg.get("enabled", False):
         return {}
 
     train_eval, test_eval = build_eval_datasets(cfg)
-    eval_tasks = list(tasks if seen_task_idx is None else tasks[: seen_task_idx + 1])
+    if task_indices is not None:
+        task_items = [(idx, tasks[idx]) for idx in task_indices]
+    elif seen_task_idx is not None:
+        task_items = [(idx, tasks[idx]) for idx in range(seen_task_idx + 1)]
+    else:
+        task_items = [(idx, task) for idx, task in enumerate(tasks)]
+    eval_tasks = [task for _, task in task_items]
     eval_classes = torch.cat(eval_tasks).tolist()
     train_eval = class_subset(train_eval, eval_classes)
     test_eval = class_subset(test_eval, eval_classes)
@@ -152,7 +158,7 @@ def run_linear_eval(
                 f"loss={total_loss / max(total, 1):.4f} lr={optimizer.param_groups[0]['lr']:.4g}",
             )
 
-    metrics = _linear_eval_accuracy(backbone, classifier, test_loader, device, eval_tasks, class_map)
+    metrics = _linear_eval_accuracy(backbone, classifier, test_loader, device, task_items, class_map)
     metrics["evaluator"] = "linear"
     metrics["accuracy"] = metrics["linear_top1"]
     if seen_task_idx is not None:

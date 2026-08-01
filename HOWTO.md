@@ -91,9 +91,19 @@ The PoC runs one evaluator per run. The configs default to paper-style linear ev
 ```yaml
 evaluation:
   method: linear
+  learning_forward_transfer: true
 ```
 
 Set `evaluation.method: knn` if you want weighted k-NN instead. Linear evaluation trains a frozen-feature classifier after each task on the classes seen so far. Pilot and confirm defaults mirror the original CaSSLe linear scripts where practical:
+
+Learning forward transfer trains each future task once in isolation from the same initialization seed, then logs:
+
+```text
+learning_forward_transfer_accuracy =
+  sequence_current_task_accuracy - isolated_task_accuracy
+```
+
+Set `evaluation.learning_forward_transfer: false` to skip these extra isolated baselines.
 
 ```yaml
 epochs: 100
@@ -146,6 +156,8 @@ Important accuracy fields:
 - `avg_forgetting_accuracy_drop`: mean drop on previous tasks from their best earlier score.
 - `evaluator`: selected evaluation backend, either `linear` or `knn`.
 - `accuracy`: selected evaluator's aggregate seen-class accuracy for that row.
+- `isolated_task_accuracy`: selected evaluator accuracy when that task is trained alone.
+- `learning_forward_transfer_accuracy`: current-task accuracy minus isolated-task accuracy.
 - `linear_top1`: final all-class linear top-1 accuracy.
 - `linear_taskX`: final linear top-1 accuracy on task `X` classes.
 - `accuracy_summary.csv`: run-level table with neutral accuracy columns first, followed by backend-specific details.
