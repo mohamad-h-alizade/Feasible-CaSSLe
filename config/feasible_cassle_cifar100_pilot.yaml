@@ -1,0 +1,86 @@
+experiment:
+  name: feasible_cassle_cifar100_pilot
+  output_dir: ${FEASIBLE_CASSLE_OUT:-outputs/feasible_cassle}
+  seed: 5
+  device: auto
+  notebook_default_methods:
+    - finetune
+    - standard_cassle
+    - crossfit_cassle
+    - feasible_cassle
+
+data:
+  dataset: cifar100
+  data_dir: ${DATA_DIR:-./data}
+  train_dir:
+  val_dir:
+  num_workers: 4
+  support_batch_size: 128
+  query_batch_size: 128
+  drop_last: true
+  limit_examples_per_task:
+
+augmentations:
+  brightness: 0.8
+  contrast: 0.8
+  saturation: 0.8
+  hue: 0.2
+  gaussian_prob: 0.0
+  solarization_prob: 0.0
+  min_scale: 0.08
+
+model:
+  method: simclr
+  encoder: resnet18
+  zero_init_residual: false
+  simclr:
+    output_dim: 256
+    proj_hidden_dim: 2048
+    temperature: 0.2
+    supervised: false
+  byol:
+    output_dim: 256
+    proj_hidden_dim: 2048
+    pred_hidden_dim: 512
+  barlow_twins:
+    output_dim: 2048
+    proj_hidden_dim: 2048
+    lamb: 0.005
+    scale_loss: 0.025
+
+training:
+  num_tasks: 5
+  task1_checkpoint:
+  task1_epochs: 25
+  epochs_per_task: 25
+  max_query_updates_per_task: 0
+
+optimization:
+  lr: 0.03
+  weight_decay: 0.00001
+
+temporal:
+  predictor_hidden_dim: 2048
+  predictor_norm: batchnorm
+  predictor_lr: 0.001
+  predictor_updates_per_step: 1
+  predictor_updates_early: 3
+  predictor_early_fraction: 0.10
+  calibration_warmup_steps: 10
+  calibration_batches: 16
+  good_quantile: 0.95
+  rho: 0.05
+  rho_grid: [0.025, 0.05, 0.10]
+  distill_gamma: 1.0
+  distill_gamma_grid: [0.1, 0.5, 1.0]
+  distill_temperature: 0.2
+  barrier_kappa: 0.1
+  qp_delta: 1.0e-12
+  epsilon_num: 1.0e-8
+
+evaluation:
+  knn_k: 20
+  batch_size: 256
+  max_distance_matrix_size: 5000000
+  max_eval_train_examples:
+  max_eval_test_examples:
