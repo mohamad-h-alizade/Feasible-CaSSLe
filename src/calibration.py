@@ -46,23 +46,17 @@ def support_predictor_step(
 
 
 @torch.no_grad()
-def evaluate_temporal_batch(
-    model: nn.Module,
+def evaluate_teacher_temporal_batch(
     historical: nn.Module,
-    predictor: nn.Module,
     adapter: TemporalLossAdapter,
     views,
 ) -> Dict[str, float]:
     x1, x2 = views
-    with eval_mode(model), eval_mode(historical), eval_mode(predictor):
-        z1 = forward_project(model, x1)
-        z2 = forward_project(model, x2)
+    with eval_mode(historical):
         frozen_z1 = forward_project(historical, x1)
         frozen_z2 = forward_project(historical, x2)
-        p1 = predictor(z1)
-        p2 = predictor(z2)
-        good = adapter(p1, p2, frozen_z1, frozen_z2)
-        chance, perm = adapter.deranged(p1, p2, frozen_z1, frozen_z2)
+        good = adapter(frozen_z1, frozen_z2, frozen_z1, frozen_z2)
+        chance, perm = adapter.deranged(frozen_z1, frozen_z2, frozen_z1, frozen_z2)
         if torch.any(perm == torch.arange(perm.numel(), device=perm.device)):
             raise AssertionError("Calibration derangement contains fixed points")
     return {"good": float(good.cpu()), "chance": float(chance.cpu())}
@@ -79,25 +73,12 @@ def calibrate_task(
     device: torch.device,
 ) -> CalibrationResult:
     temporal = cfg["temporal"]
-    for _ in range(int(temporal.get("calibration_warmup_steps", 10))):
-        batch = move_batch(next(batches), device)
-        support_predictor_step(
-            model,
-            historical,
-            predictor,
-            predictor_optimizer,
-            adapter,
-            batch.support_views,
-        )
-
     good_losses = []
     chance_losses = []
     for _ in range(int(temporal.get("calibration_batches", 16))):
         batch = move_batch(next(batches), device)
-        values = evaluate_temporal_batch(
-            model,
+        values = evaluate_teacher_temporal_batch(
             historical,
-            predictor,
             adapter,
             batch.query_views,
         )
@@ -112,7 +93,8 @@ def calibrate_task(
     if d_chance <= d_good:
         raise RuntimeError(
             "Degenerate temporal calibration: D_chance <= D_good. "
-            "Try more predictor warm-up, larger support/query batches, and check for representation collapse."
+            "Teacher-only chance loss should exceed teacher-self loss. "
+            "Try larger query batches/calibration_batches, check the temporal objective, and inspect for collapse."
         )
     scale = max(d_chance - d_good, eps)
     rho = float(temporal.get("rho", 0.05))
@@ -124,4 +106,3 @@ def calibrate_task(
         raw_budget=raw_budget,
         rho=rho,
     )
-

@@ -73,7 +73,6 @@ temporal:
   predictor_updates_per_step: 1
   predictor_updates_early: 3
   predictor_early_fraction: 0.10
-  calibration_warmup_steps: 10
   calibration_batches: 16
   good_quantile: 0.95
   rho: 0.05

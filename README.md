@@ -1,105 +1,190 @@
-# Self-Supervised Models are Continual Learners
-This is the official repository for the paper:
-> **[Self-Supervised Models are Continual Learners](https://arxiv.org/abs/2112.04215)**<br>
-> [Enrico Fini*](https://scholar.google.com/citations?user=OQMtSKIAAAAJ&hl=en), [Victor Turrisi*](https://scholar.google.com/citations?user=UQctXiEAAAAJ&hl=en&oi=ao), [Xavier Alameda-Pineda](https://scholar.google.com/citations?hl=en&user=ukI2bz8AAAAJ), [Elisa Ricci](https://scholar.google.com/citations?user=xf1T870AAAAJ&hl=en), [Karteek Alahari](https://scholar.google.com/citations?hl=en&user=qcyG7rwAAAAJ), [Julien Mairal](https://scholar.google.com/citations?hl=en&user=Bx9WGD6lBFEC)<br>
-> **CVPR 2022**
+# Feasible CaSSLe HOWTO
 
-> **Abstract:** *Self-supervised models have been shown to produce comparable or better visual representations than their supervised counterparts when trained offline on unlabeled data at scale. However, their efficacy is catastrophically reduced in a Continual Learning (CL) scenario where data is presented to the model sequentially. In this paper, we show that self-supervised loss functions can be seamlessly converted into distillation mechanisms for CL by adding a predictor network that maps the current state of the representations to their past state. This enables us to devise a framework for Continual self-supervised visual representation Learning that (i) significantly improves the quality of the learned representations, (ii) is compatible with several state-of-the-art self-supervised objectives, and (iii) needs little to no hyperparameter tuning. We demonstrate the effectiveness of our approach empirically by training six popular self-supervised models in various CL settings.*
-<br>
-<p align="center" float="left">
-    <img src="./assets/method.png"/ width=49%> 
-    <img src="./assets/results.png"/ width=49%>
-    <em>Overview of our method and results</em>
-</p>
+This guide covers only the new proof-of-concept code in `src/`, `config/`, and `main.ipynb`. The original CaSSLe scripts and `README.md` are unchanged.
 
-NOTE: most of the code in this repository is borrowed from [solo-learn](https://github.com/vturrisi/solo-learn)
+## 1. Environment
 
-# Installation
-Use the following commands to create an environment and install the required packages (needs `conda`):
-```
-conda create --name cassle python=3.8
-conda activate cassle
-conda install pytorch=1.10.2 torchvision cudatoolkit=11.3 -c pytorch
-pip install pytorch-lightning==1.5.4 lightning-bolts wandb sklearn einops
-pip install --extra-index-url https://developer.download.nvidia.com/compute/redist --upgrade nvidia-dali-cuda110
-```
-Remember to check your cuda version and modify the install commands accorgingly.
+Install the original repo dependencies first. In this workspace, the PoC also needs:
 
-OPTIONAL: consider installing `pillow-SIMD` for faster data loading:
-```
-pip uninstall pillow
-CC="cc -mavx2" pip install -U --force-reinstall pillow-simd
+```bash
+python -m pip install pytorch-lightning==1.9.5 lightning-bolts==0.7.0 torchmetrics==0.11.4 einops
 ```
 
-# Commands
-Here below you can find a few example commands for running our code. The bash scripts with full training configurations for our continual and linear evaluation experiments can be found in the `bash_files` folder. Use our `job_launcher.py` to launch continual self-supervised learning experiments. We also provide example code for launching jobs with SLURM where you can pass the desired configuration for your job (bash script, data directory, number of GPUs, walltime, etc...).
+Set the dataset path if you do not want the default `./data`:
 
-NOTE: each experiment uses a different number of gpus (1 for CIFAR100, 2 for ImageNet100 and 4 for DomainNet). You can change this setting directly in the bash scripts.
-
-## Fine-tuning
-### CIFAR100
-E.g. running Barlow Twins:
-```
-DATA_DIR=/path/to/data/dir/ CUDA_VISIBLE_DEVICES=0 python job_launcher.py --script bash_files/continual/cifar/barlow.sh
-```
-### ImageNet100
-#### Class-incremental
-E.g. running BYOL:
-```
-DATA_DIR=/path/to/data/dir/ CUDA_VISIBLE_DEVICES=0,1 python job_launcher.py --script bash_files/continual/imagenet-100/class/byol.sh
-```
-#### Data-incremental
-E.g. running SimCLR:
-```
-DATA_DIR=/path/to/data/dir/ CUDA_VISIBLE_DEVICES=0,1 python job_launcher.py --script bash_files/continual/imagenet-100/data/simclr.sh
-```
-### DomainNet
-E.g. running SwAV:
-```
-DATA_DIR=/path/to/data/dir/ CUDA_VISIBLE_DEVICES=0,1,2,3 python job_launcher.py --script bash_files/continual/domainnet/swav.sh
+```bash
+export DATA_DIR=/path/to/data
 ```
 
-## CaSSLe
-After running fine-tuning, you can also run CaSSLe by just loading the checkpoint of the first task. You will find all the checkpoints in your experiment directory (defaults to `"./experiments"`). Check the id of your run on WandB to make sure you are loading the correct checkpoint.
-### CIFAR100
-E.g. running Barlow Twins + CaSSLe:
-```
-PRETRAINED_PATH=/path/to/task0/checkpoint/ DATA_DIR=/path/to/data/dir/ CUDA_VISIBLE_DEVICES=0 python job_launcher.py --script bash_files/continual/cifar/barlow_distill.sh
-```
-### ImageNet100
-#### Class-incremental
-E.g. running BYOL + CaSSLe:
-```
-PRETRAINED_PATH=/path/to/task0/checkpoint/ DATA_DIR=/path/to/data/dir/ CUDA_VISIBLE_DEVICES=0,1 python job_launcher.py --script bash_files/continual/imagenet-100/class/byol_distill.sh
-```
-#### Data-incremental
-E.g. running SimCLR + CaSSLe:
-```
-PRETRAINED_PATH=/path/to/task0/checkpoint/ DATA_DIR=/path/to/data/dir/ CUDA_VISIBLE_DEVICES=0,1 python job_launcher.py --script bash_files/continual/imagenet-100/data/simclr_distill.sh
+The expected CIFAR-100 layout is a single torchvision root:
+
+```text
+$DATA_DIR/cifar100/cifar-100-python/
 ```
 
-### DomainNet
-E.g. running SwAV + CaSSLe:
-```
-PRETRAINED_PATH=/path/to/task0/checkpoint/ DATA_DIR=/path/to/data/dir/ CUDA_VISIBLE_DEVICES=0,1,2,3 python job_launcher.py --script bash_files/continual/domainnet/swav_distill.sh
+The PoC configs default to `download: true`, but train and eval share the same root, so torchvision downloads/extracts CIFAR-100 once and reuses it on later runs. Set `data.download: false` if you want a wrong path to fail immediately.
+
+## 2. Smoke Run
+
+Smoke is a correctness check, not a scientific experiment. It uses few examples, very few updates, capped k-NN evaluation, and 1 epoch of linear evaluation.
+
+```bash
+python -m src.experiments \
+  --config config/feasible_cassle_cifar100_smoke.yaml \
+  --run smoke
 ```
 
-## Linear Evaluation
-For linear evaluation you do not need the job launcher. You can simply run the scripts from `bash_files/linear`, e.g., for VICReg:
-```
-PRETRAINED_PATH=/path/to/last/checkpoint/ DATA_DIR=/path/to/data/dir/ bash bash_files/linear/imagenet-100/class/vicreg_linear.sh
+The command prints a timestamped run directory under `outputs/feasible_cassle/`.
+
+## 3. Pilot Run
+
+Pilot uses full CIFAR-100, 5 class-incremental tasks, SimCLR, 25 epochs per task, one seed, local logs, k-NN diagnostics, and paper-style linear evaluation.
+
+```bash
+python -m src.experiments \
+  --config config/feasible_cassle_cifar100_pilot.yaml \
+  --run pilot
 ```
 
-# Logging
-Logging is performed with [WandB](https://wandb.ai/site). Please create an account and specify your `--entity YOUR_ENTITY` and `--project YOUR_PROJECT` in the bash scripts. For debugging, or if you do not want all the perks of WandB, you can disable logging by passing `--offline` in your bash scripts. After training you can always sync an offline run with the following command: `wandb sync your/wandb/run/folder`.
+By default it runs:
 
-# Citation
-If you like our work, please cite our [paper](https://arxiv.org/abs/2112.04215):
+```text
+offline_ssl
+finetune
+standard_cassle
+crossfit_cassle
+feasible_cassle
 ```
-@inproceedings{fini2021self,
-  title={Self-Supervised Models are Continual Learners},
-  author={Fini, Enrico and da Costa, Victor G Turrisi and Alameda-Pineda, Xavier and Ricci, Elisa and Alahari, Karteek and Mairal, Julien},
-  booktitle={Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition},
-  year={2022}
-}
+
+To run only selected methods:
+
+```bash
+python -m src.experiments \
+  --config config/feasible_cassle_cifar100_pilot.yaml \
+  --run pilot \
+  --methods offline_ssl feasible_cassle standard_cassle
+```
+
+## 4. Confirmation Run
+
+Confirmation is prepared for longer validation after pilot results look credible: 50 epochs per task and three seed values recorded in config. It does not automatically launch a sweep.
+
+```bash
+python -m src.experiments \
+  --config config/feasible_cassle_cifar100_confirm.yaml \
+  --run confirm
+```
+
+## 5. Baselines
+
+- `offline_ssl`: trains SimCLR once on all CIFAR-100 classes jointly. This is the non-continual upper-bound-style reference.
+- `finetune`: trains each new task with only the current-task SSL loss.
+- `standard_cassle`: updates with `S_Q + gamma * D_Q_raw` using original CaSSLe symmetric contrastive temporal loss.
+- `crossfit_cassle`: updates the temporal predictor on support data, freezes it, then applies the penalty loss on query data.
+- `feasible_cassle`: takes the SSL step when it satisfies the normalized temporal budget, otherwise applies the QP correction.
+- `compute_matched_finetune`: spends comparable support-side compute but updates the encoder only with SSL.
+
+## 6. Evaluation
+
+The PoC runs one evaluator per run. The configs default to paper-style linear evaluation:
+
+```yaml
+evaluation:
+  method: linear
+  learning_forward_transfer: true
+```
+
+Set `evaluation.method: knn` if you want weighted k-NN instead. Linear evaluation trains a frozen-feature classifier after each task on the classes seen so far. Pilot and confirm defaults mirror the original CaSSLe linear scripts where practical:
+
+Learning forward transfer trains each future task once in isolation from the same initialization seed, then logs:
+
+```text
+learning_forward_transfer_accuracy =
+  sequence_current_task_accuracy - isolated_task_accuracy
+```
+
+Set `evaluation.learning_forward_transfer: false` to skip these extra isolated baselines.
+
+Figures are generated automatically after each completed run:
+
+```yaml
+plots:
+  enabled: true
+```
+
+Set `plots.enabled: false` to skip figure generation.
+
+```yaml
+epochs: 100
+optimizer: SGD
+lr: 1.0
+weight_decay: 0.0
+scheduler: step
+lr_decay_steps: [60, 80]
+batch_size: 256
+```
+
+Linear outputs are saved in each method folder:
+
+```text
+linear_eval_log.csv
+<method>_taskX_linear_eval.json
+```
+
+`offline_ssl` writes:
+
+```text
+offline_ssl_linear_eval.json
+```
+
+## 7. Logs
+
+Runs print live progress to stdout by default: run directory, device, selected methods, training step losses, the selected evaluator's accuracy, and linear-eval loss/top-1 when `evaluation.method: linear`. Control verbosity in each config:
+
+```yaml
+logging:
+  progress: true
+  progress_interval: 25
+```
+
+Each run directory contains:
+
+```text
+config.json
+class_order.json
+shared/task0.ckpt
+<method>/train_log.csv
+<method>/eval_log.csv
+<method>/summary.json
+figures/*.png
+```
+
+Important accuracy fields:
+
+- `current_task_accuracy`: selected evaluator accuracy on the task just learned.
+- `avg_seen_accuracy`: mean accuracy over all tasks seen so far.
+- `avg_forgetting_accuracy_drop`: mean drop on previous tasks from their best earlier score.
+- `evaluator`: selected evaluation backend, either `linear` or `knn`.
+- `accuracy`: selected evaluator's aggregate seen-class accuracy for that row.
+- `isolated_task_accuracy`: selected evaluator accuracy when that task is trained alone.
+- `learning_forward_transfer_accuracy`: current-task accuracy minus isolated-task accuracy.
+- `linear_top1`: final all-class linear top-1 accuracy.
+- `linear_taskX`: final linear top-1 accuracy on task `X` classes.
+- `accuracy_summary.csv`: run-level table with neutral accuracy columns first, followed by backend-specific details.
+
+Important Feasible diagnostics:
+
+- `R_Q`: normalized temporal reconstruction error.
+- `rho`: allowed normalized reconstruction budget.
+- `active`: whether the QP constraint corrected the SSL step.
+- `lambda_star`: scalar QP dual variable.
+- `grad_cosine`: cosine between SSL and temporal gradients.
+- `correction_ratio`: size of the QP correction relative to the ordinary SSL step.
+
+## 8. Notebook
+
+Use `main.ipynb` to inspect configs, run guarded commands, load result files, plot metrics, and make a go/no-go assessment. Expensive cells are disabled by default with:
+
+```python
+RUN_TRAINING = False
 ```
