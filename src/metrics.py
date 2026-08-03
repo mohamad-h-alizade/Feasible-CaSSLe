@@ -84,9 +84,12 @@ def summarize_forgetting(eval_history: List[Dict[str, float]], current_task: int
         return 0.0
     forgetting = []
     current = eval_history[-1]
+    evaluator = current.get("evaluator", "knn")
+    prefix = "linear_task" if evaluator == "linear" else "knn_task"
     for task_idx in range(current_task):
-        key = f"knn_task{task_idx}"
-        best_before = max(row.get(key, 0.0) for row in eval_history[:-1])
-        forgetting.append(best_before - current.get(key, 0.0))
+        key = f"{prefix}{task_idx}"
+        if key not in current:
+            continue
+        best_before = max(float(row.get(key, 0.0) or 0.0) for row in eval_history[:-1])
+        forgetting.append(best_before - float(current.get(key, 0.0) or 0.0))
     return sum(forgetting) / max(len(forgetting), 1)
-

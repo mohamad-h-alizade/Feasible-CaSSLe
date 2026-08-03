@@ -188,7 +188,10 @@ def write_diagnostics_summary(run_dir: Path) -> None:
             "S_Q",
             "D_Q_raw",
             "R_Q",
+            "grad_dot",
             "grad_cosine",
+            "grad_ssl_norm",
+            "grad_temporal_norm",
             "lambda_star",
             "correction_ratio",
             "wall_time_s",
@@ -201,11 +204,16 @@ def write_diagnostics_summary(run_dir: Path) -> None:
                 numeric[f"max_{key}"] = max(values)
         active_values = [row.get("active") for row in records if row.get("active") not in ("", None)]
         skipped_values = [row.get("skipped") for row in records if row.get("skipped") not in ("", None)]
+        conflict_values = [
+            row.get("gradient_conflict") for row in records if row.get("gradient_conflict") not in ("", None)
+        ]
         row = {
             "method": method,
             "steps": len(records),
             "active_steps": sum(v == "True" for v in active_values),
             "active_rate": sum(v == "True" for v in active_values) / max(len(active_values), 1),
+            "conflict_steps": sum(v == "True" for v in conflict_values),
+            "conflict_rate": sum(v == "True" for v in conflict_values) / max(len(conflict_values), 1),
             "skipped_steps": sum(v == "True" for v in skipped_values),
             **numeric,
         }

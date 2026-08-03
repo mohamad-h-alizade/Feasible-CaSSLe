@@ -110,10 +110,11 @@ def generate_run_figures(cfg: Dict, run_dir: Path) -> List[str]:
         diagnostics = pd.read_csv(diagnostics_path)
         diagnostics = _to_numeric(
             diagnostics,
-            ["active_rate", "mean_grad_cosine", "mean_correction_ratio", "max_peak_memory_mb"],
+            ["active_rate", "conflict_rate", "mean_grad_cosine", "mean_correction_ratio", "max_peak_memory_mb"],
         )
         for column, title, filename in [
             ("active_rate", "QP Constraint Active Rate", "active_rate.png"),
+            ("conflict_rate", "Gradient Conflict Rate", "gradient_conflict_rate.png"),
             ("mean_grad_cosine", "Mean Gradient Cosine", "gradient_cosine.png"),
             ("mean_correction_ratio", "Mean Correction Ratio", "correction_ratio.png"),
         ]:

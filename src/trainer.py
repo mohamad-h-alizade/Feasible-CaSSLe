@@ -39,7 +39,7 @@ from src.models import (
     representation_parameters,
     update_momentum_targets,
 )
-from src.qp import apply_updates, grads_or_zeros, solve_feasible_step
+from src.qp import apply_updates, dot, grads_or_zeros, norm2, solve_feasible_step
 from src.temporal_losses import TemporalLossAdapter, normalized_reconstruction
 from src.utils import (
     append_csv,
@@ -158,6 +158,19 @@ def _clear_parameter_grads(modules: Sequence[nn.Module]) -> None:
             continue
         for param in module.parameters():
             param.grad = None
+
+
+def _gradient_diagnostics(g_ssl: Sequence[torch.Tensor], g_temporal: Sequence[torch.Tensor]) -> Dict[str, float]:
+    ssl_norm = float(torch.sqrt(norm2(g_ssl).detach().clamp_min(0)).cpu())
+    temporal_norm = float(torch.sqrt(norm2(g_temporal).detach().clamp_min(0)).cpu())
+    grad_dot = float(dot(g_ssl, g_temporal).detach().cpu())
+    return {
+        "grad_ssl_norm": ssl_norm,
+        "grad_temporal_norm": temporal_norm,
+        "grad_dot": grad_dot,
+        "grad_cosine": grad_dot / (ssl_norm * temporal_norm + 1e-12),
+        "gradient_conflict": grad_dot < 0.0,
+    }
 
 
 def train_task1(cfg: Dict, run_dir: Path, device: torch.device, tasks) -> Path:
@@ -428,7 +441,7 @@ def run_method(
         batches = make_batches(cfg, task_idx, tasks)
         calibration = None
         if method in {"crossfit_cassle", "feasible_cassle", "compute_matched_finetune"}:
-            progress_print(cfg, f"[{method}] task={task_idx} calibrate temporal predictor")
+            progress_print(cfg, f"[{method}] task={task_idx} calibrate temporal budget")
             calibration = calibrate_task(
                 cfg,
                 model,
@@ -575,7 +588,10 @@ def train_task_increment(
             apply_updates(params, _sgd_updates(params, grads, lr, weight_decay))
         elif method == "standard_cassle":
             total = ssl + gamma * raw
-            grads = grads_or_zeros(total, params)
+            g_ssl = grads_or_zeros(ssl, params)
+            g_temporal = grads_or_zeros(raw, params)
+            row.update(_gradient_diagnostics(g_ssl, g_temporal))
+            grads = [gs + gamma * gt for gs, gt in zip(g_ssl, g_temporal)]
             predictor_optimizer.zero_grad(set_to_none=True)
             raw.backward()
             predictor_optimizer.step()
@@ -583,7 +599,10 @@ def train_task_increment(
             row["loss_total"] = float(total.detach().cpu())
         elif method == "crossfit_cassle":
             total = ssl + gamma * raw
-            grads = grads_or_zeros(total, params)
+            g_ssl = grads_or_zeros(ssl, params)
+            g_temporal = grads_or_zeros(raw, params)
+            row.update(_gradient_diagnostics(g_ssl, g_temporal))
+            grads = [gs + gamma * gt for gs, gt in zip(g_ssl, g_temporal)]
             apply_updates(params, _sgd_updates(params, grads, lr, weight_decay))
             row["loss_total"] = float(total.detach().cpu())
         elif method == "feasible_cassle":
@@ -601,6 +620,7 @@ def train_task_increment(
                 delta=float(cfg["temporal"].get("qp_delta", 1e-12)),
             )
             row.update(qp.asdict())
+            row["gradient_conflict"] = row["grad_dot"] < 0.0
             if not qp.skipped:
                 apply_updates(params, updates)
             else:
@@ -624,9 +644,17 @@ def train_task_increment(
             msg = f"[{method}] task={task_idx} step={step + 1}/{total_steps} S_Q={row['S_Q']:.4f}"
             if row["D_Q_raw"] != "":
                 msg += f" D={row['D_Q_raw']:.4f}"
+            if isinstance(row.get("grad_cosine"), float):
+                msg += (
+                    f" cos={row.get('grad_cosine'):.4f} "
+                    f"dot={row.get('grad_dot'):.4g} "
+                    f"conflict={row.get('gradient_conflict')}"
+                )
             if row["R_Q"] != "":
                 msg += (
                     f" R={row['R_Q']:.4f} active={row.get('active')} "
+                    f"a_dot_d0={row.get('a_dot_d0'):.4g} "
+                    f"b={row.get('b'):.4g} "
                     f"corr={row.get('correction_ratio'):.4f}"
                 )
             progress_print(cfg, msg)
