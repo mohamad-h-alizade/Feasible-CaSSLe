@@ -61,6 +61,7 @@ METHODS = {
     "offline_ssl",
     "finetune",
     "standard_cassle",
+    "standard_cassle_gamma1",
     "crossfit_cassle",
     "feasible_cassle",
     "compute_matched_finetune",
@@ -92,6 +93,18 @@ def _eval_log_row(method: str, result: Dict) -> Dict:
 
 def _learning_fwt_enabled(cfg: Dict) -> bool:
     return bool(cfg.get("evaluation", {}).get("learning_forward_transfer", True))
+
+
+def _base_method(method: str) -> str:
+    if method == "standard_cassle_gamma1":
+        return "standard_cassle"
+    return method
+
+
+def _distill_gamma(cfg: Dict, method: str) -> float:
+    if method == "standard_cassle_gamma1":
+        return 1.0
+    return float(cfg["temporal"].get("distill_gamma", 1.0))
 
 
 def make_batches(cfg: Dict, task_idx: int, tasks: Sequence[torch.Tensor]):
@@ -416,6 +429,7 @@ def run_method(
     if method == "offline_ssl":
         return train_offline_ssl(cfg, run_dir, device, tasks)
 
+    base_method = _base_method(method)
     method_dir = run_dir / method
     method_dir.mkdir(parents=True, exist_ok=False)
     progress_print(cfg, f"[{method}] start")
@@ -440,7 +454,7 @@ def run_method(
         )
         batches = make_batches(cfg, task_idx, tasks)
         calibration = None
-        if method in {"crossfit_cassle", "feasible_cassle", "compute_matched_finetune"}:
+        if base_method in {"crossfit_cassle", "feasible_cassle", "compute_matched_finetune"}:
             progress_print(cfg, f"[{method}] task={task_idx} calibrate temporal budget")
             calibration = calibrate_task(
                 cfg,
@@ -453,7 +467,7 @@ def run_method(
                 device,
             )
             save_json(method_dir / f"task{task_idx}_calibration.json", calibration.asdict())
-        elif method == "standard_cassle":
+        elif base_method == "standard_cassle":
             calibration = CalibrationResult(0.0, 1.0, 1.0, 0.0, float(cfg["temporal"]["rho"]))
 
         train_task_increment(
@@ -522,10 +536,11 @@ def train_task_increment(
     device: torch.device,
     tasks,
 ) -> None:
+    base_method = _base_method(method)
     params = representation_parameters(model)
     lr = float(cfg["optimization"]["lr"])
     weight_decay = float(cfg["optimization"].get("weight_decay", 0.0))
-    gamma = float(cfg["temporal"].get("distill_gamma", 1.0))
+    gamma = _distill_gamma(cfg, method)
     max_steps = int(cfg["training"].get("max_query_updates_per_task", 0) or 10**12)
     epochs = int(cfg["training"]["epochs_per_task"])
     task_dataset = build_pretrain_dataset(cfg, task_idx=task_idx, tasks=tasks)
@@ -539,7 +554,7 @@ def train_task_increment(
         batch = move_batch(next(batches), device)
         start_time = time.time()
         support_updates = 0
-        if method in {"crossfit_cassle", "feasible_cassle", "compute_matched_finetune"}:
+        if base_method in {"crossfit_cassle", "feasible_cassle", "compute_matched_finetune"}:
             updates = int(cfg["temporal"].get("predictor_updates_early", 3)) if step < early_steps else int(
                 cfg["temporal"].get("predictor_updates_per_step", 1)
             )
@@ -553,7 +568,7 @@ def train_task_increment(
                     batch.support_views,
                 )
                 support_updates += 1
-        elif method == "standard_cassle":
+        elif base_method == "standard_cassle":
             support_updates = 0
 
         ssl, raw, norm = _simclr_query_losses(
@@ -563,8 +578,8 @@ def train_task_increment(
             predictor if method != "finetune" else None,
             adapter,
             batch.query_views,
-            calibration if method == "feasible_cassle" else None,
-            freeze_predictor=method != "standard_cassle",
+            calibration if base_method == "feasible_cassle" else None,
+            freeze_predictor=base_method != "standard_cassle",
         )
         assert_finite_tensor("S_Q", ssl)
         row = {
@@ -583,10 +598,10 @@ def train_task_increment(
             "skip_reason": "",
         }
 
-        if method == "finetune" or method == "compute_matched_finetune":
+        if base_method == "finetune" or base_method == "compute_matched_finetune":
             grads = grads_or_zeros(ssl, params)
             apply_updates(params, _sgd_updates(params, grads, lr, weight_decay))
-        elif method == "standard_cassle":
+        elif base_method == "standard_cassle":
             total = ssl + gamma * raw
             g_ssl = grads_or_zeros(ssl, params)
             g_temporal = grads_or_zeros(raw, params)
@@ -597,7 +612,8 @@ def train_task_increment(
             predictor_optimizer.step()
             apply_updates(params, _sgd_updates(params, grads, lr, weight_decay))
             row["loss_total"] = float(total.detach().cpu())
-        elif method == "crossfit_cassle":
+            row["distill_gamma"] = gamma
+        elif base_method == "crossfit_cassle":
             total = ssl + gamma * raw
             g_ssl = grads_or_zeros(ssl, params)
             g_temporal = grads_or_zeros(raw, params)
@@ -605,7 +621,8 @@ def train_task_increment(
             grads = [gs + gamma * gt for gs, gt in zip(g_ssl, g_temporal)]
             apply_updates(params, _sgd_updates(params, grads, lr, weight_decay))
             row["loss_total"] = float(total.detach().cpu())
-        elif method == "feasible_cassle":
+            row["distill_gamma"] = gamma
+        elif base_method == "feasible_cassle":
             g_ssl = grads_or_zeros(ssl, params)
             g_temporal = grads_or_zeros(norm, params)
             updates, qp = solve_feasible_step(
